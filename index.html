@@ -97,6 +97,14 @@
 
         let app, db, scoreRef;
         let firebaseConnected = false;
+        const FALLBACK_DATABASE_URL = 'https://badgeday-9c840-default-rtdb.firebaseio.com';
+        const restDatabaseURL = (
+            !firebaseConfig.databaseURL.includes('YOUR_')
+                ? firebaseConfig.databaseURL
+                : FALLBACK_DATABASE_URL
+        ).replace(/\/$/, '');
+        const restScoreURL = `${restDatabaseURL}/session/scores.json`;
+        let restPollTimer = null;
 
         const hasPlaceholderFirebaseConfig = Object.values(firebaseConfig).some(
             (value) => typeof value === 'string' && value.includes('YOUR_')
@@ -205,6 +213,7 @@
             landingPage.classList.add('hidden');
             adminPanel.classList.add('hidden');
             tvPanel.classList.remove('hidden');
+            renderScores();
         };
 
         // Logout Handler
@@ -215,6 +224,84 @@
                 initializePage();
             }
         };
+
+        async function saveScoresToRest() {
+            try {
+                const response = await fetch(restScoreURL, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(scores)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`REST write failed with status ${response.status}`);
+                }
+
+                return true;
+            } catch (error) {
+                console.error('REST database write failed.', error);
+                return false;
+            }
+        }
+
+        async function fetchScoresFromRest() {
+            try {
+                const response = await fetch(`${restScoreURL}?t=${Date.now()}`, {
+                    cache: 'no-store'
+                });
+
+                if (!response.ok) {
+                    throw new Error(`REST read failed with status ${response.status}`);
+                }
+
+                const data = await response.json();
+                return { ok: true, data };
+            } catch (error) {
+                console.error('REST database read failed.', error);
+                return { ok: false, data: null };
+            }
+        }
+
+        async function loadFromRestDatabase() {
+            const result = await fetchScoresFromRest();
+            if (!result.ok) return false;
+
+            if (result.data && typeof result.data === 'object') {
+                scores = result.data;
+            } else {
+                scores = createDefaultScores();
+                await saveScoresToRest();
+            }
+
+            localStorage.setItem('houseScores', JSON.stringify(scores));
+
+            if (!isDataLoaded) {
+                isDataLoaded = true;
+                renderScores();
+                initializePage();
+            } else {
+                renderScores();
+            }
+
+            return true;
+        }
+
+        function startRestPolling() {
+            if (restPollTimer) return;
+
+            restPollTimer = window.setInterval(async () => {
+                const result = await fetchScoresFromRest();
+                if (!result.ok || !result.data || typeof result.data !== 'object') return;
+
+                const incoming = JSON.stringify(result.data);
+                const current = JSON.stringify(scores);
+                if (incoming !== current) {
+                    scores = result.data;
+                    localStorage.setItem('houseScores', JSON.stringify(scores));
+                    renderScores();
+                }
+            }, 2000);
+        }
 
         async function persistScores() {
             if (firebaseConnected && scoreRef && db) {
@@ -227,6 +314,10 @@
                 }
             }
 
+            const savedToRest = await saveScoresToRest();
+            if (!savedToRest) {
+                console.warn('Using local storage only because REST sync is unavailable.');
+            }
             localStorage.setItem('houseScores', JSON.stringify(scores));
             renderScores();
         }
@@ -239,6 +330,26 @@
             }
             scores[team] = Math.max(0, scores[team] + delta);
 
+            await persistScores();
+        };
+
+        window.setTeamScore = async (team) => {
+            if (!isAuthenticated) {
+                alert('You must be logged in as host to update scores');
+                return;
+            }
+
+            const input = document.getElementById(`score-input-${team}`);
+            if (!input) return;
+
+            const nextScore = Number.parseInt(input.value, 10);
+            if (Number.isNaN(nextScore) || nextScore < 0) {
+                alert('Enter a valid non-negative number');
+                input.value = scores[team];
+                return;
+            }
+
+            scores[team] = nextScore;
             await persistScores();
         };
 
@@ -292,8 +403,14 @@
                 loadFromLocalStorage();
             });
         } else {
-            // Firebase not connected, use local storage
-            loadFromLocalStorage();
+            // Firebase SDK not connected, try REST sync for cross-device updates.
+            loadFromRestDatabase().then((loaded) => {
+                if (loaded) {
+                    startRestPolling();
+                } else {
+                    loadFromLocalStorage();
+                }
+            });
         }
 
         function loadFromLocalStorage() {
@@ -360,10 +477,18 @@
                                                 <div class="text-5xl font-black text-white drop-shadow-lg">${score}</div>
                                             </div>
                                         </div>
-                                        <div class="flex gap-2">
-                                            <button onclick="updateScore('${team}', 10)" class="bg-white/25 hover:bg-white/50 text-white px-3 py-2 rounded font-bold transition border border-white/30">+10</button>
-                                            <button onclick="updateScore('${team}', 1)" class="bg-white/30 hover:bg-white/60 text-white px-4 py-2 rounded-lg font-bold text-lg transition border border-white/30">+</button>
-                                            <button onclick="updateScore('${team}', -1)" class="bg-red-600/70 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-bold text-lg transition border border-red-500">-</button>
+                                        <div class="flex items-center gap-2">
+                                            <input
+                                                id="score-input-${team}"
+                                                type="number"
+                                                min="0"
+                                                step="1"
+                                                value="${score}"
+                                                onkeydown="if(event.key === 'Enter'){ setTeamScore('${team}'); }"
+                                                onchange="setTeamScore('${team}')"
+                                                class="w-20 bg-white/20 border border-white/30 rounded-md px-2 py-2 text-white text-center font-bold outline-none focus:border-yellow-300"
+                                            />
+                                            <button onclick="setTeamScore('${team}')" class="bg-blue-700/80 hover:bg-blue-800 text-white px-4 py-2 rounded-lg font-bold transition border border-blue-500">Set</button>
                                         </div>
                                     </div>
                                 </div>
@@ -381,6 +506,9 @@
                 setTimeout(() => {
                     if (!isDataLoaded) {
                         loadFromLocalStorage();
+                    } else {
+                        initializePage();
+                        renderScores();
                     }
                 }, 100);
             });
@@ -390,6 +518,9 @@
             setTimeout(() => {
                 if (!isDataLoaded) {
                     loadFromLocalStorage();
+                } else {
+                    initializePage();
+                    renderScores();
                 }
             }, 100);
         }
