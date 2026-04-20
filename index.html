@@ -92,47 +92,74 @@
         };
 
         // ===== CHANGE THIS PASSWORD =====
-        const HOST_PASSWORD = "password123";
+        const HOST_PASSWORD = "123";
         // =================================
 
         let app, db, scoreRef;
         let firebaseConnected = false;
 
+        const hasPlaceholderFirebaseConfig = Object.values(firebaseConfig).some(
+            (value) => typeof value === 'string' && value.includes('YOUR_')
+        );
+
         // Try to initialize Firebase
-        try {
-            app = initializeApp(firebaseConfig);
-            db = getDatabase(app);
-            scoreRef = ref(db, 'session/scores');
-            firebaseConnected = true;
-        } catch (error) {
-            console.warn('Firebase not configured. Using local storage instead.', error);
+        if (!hasPlaceholderFirebaseConfig) {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getDatabase(app);
+                scoreRef = ref(db, 'session/scores');
+                firebaseConnected = true;
+            } catch (error) {
+                console.warn('Firebase not configured correctly. Using local storage instead.', error);
+                firebaseConnected = false;
+            }
+        } else {
+            console.warn('Firebase config contains placeholder values. Using local storage instead.');
             firebaseConnected = false;
         }
 
         // Hogwarts House Configuration
         const teamConfig = {
-            TeamA: { name: '🦁 Gryffindor', color: 'from-red-700 via-red-600 to-yellow-500', border: 'border-red-500', icon: '🦁' },
-            TeamB: { name: '🐍 Slytherin', color: 'from-green-800 via-emerald-700 to-gray-400', border: 'border-green-600', icon: '🐍' },
-            TeamC: { name: '🦅 Ravenclaw', color: 'from-blue-800 via-blue-600 to-amber-400', border: 'border-blue-500', icon: '🦅' },
-            TeamD: { name: '🦡 Hufflepuff', color: 'from-yellow-600 via-yellow-500 to-gray-800', border: 'border-yellow-500', icon: '🦡' },
-            TeamE: { name: '⚡ Dumbledore\'s Army', color: 'from-purple-700 via-indigo-600 to-pink-500', border: 'border-purple-500', icon: '⚡' }
+            TeamA: { name: 'Team A', color: 'from-red-700 via-red-600 to-yellow-500', border: 'border-red-500', icon: 'A' },
+            TeamB: { name: 'Team B', color: 'from-green-800 via-emerald-700 to-gray-400', border: 'border-green-600', icon: 'B' },
+            TeamC: { name: 'Team C', color: 'from-blue-800 via-blue-600 to-amber-400', border: 'border-blue-500', icon: 'C' },
+            TeamD: { name: 'Team D', color: 'from-yellow-600 via-yellow-500 to-gray-800', border: 'border-yellow-500', icon: 'D' },
+            TeamE: { name: 'Team E', color: 'from-purple-700 via-indigo-600 to-pink-500', border: 'border-purple-500', icon: 'E' }
         };
 
+        const DEFAULT_SCORE = 100;
+        const createDefaultScores = () => ({
+            TeamA: DEFAULT_SCORE,
+            TeamB: DEFAULT_SCORE,
+            TeamC: DEFAULT_SCORE,
+            TeamD: DEFAULT_SCORE,
+            TeamE: DEFAULT_SCORE
+        });
+
         // Initial Data Structure
-        let scores = { TeamA: 0, TeamB: 0, TeamC: 0, TeamD: 0, TeamE: 0 };
+        let scores = createDefaultScores();
         let isDataLoaded = false;
 
-        // DOM Elements
-        const landingPage = document.getElementById('landing-page');
-        const adminPanel = document.getElementById('admin-panel');
-        const tvPanel = document.getElementById('tv-panel');
-        const scoreContainer = document.getElementById('score-container');
+        // DOM Elements (initialized after DOM is ready)
+        let landingPage = null;
+        let adminPanel = null;
+        let tvPanel = null;
+        let scoreContainer = null;
+
+        function initDomRefs() {
+            landingPage = document.getElementById('landing-page');
+            adminPanel = document.getElementById('admin-panel');
+            tvPanel = document.getElementById('tv-panel');
+            scoreContainer = document.getElementById('score-container');
+        }
 
         // Authentication Management
         let isAuthenticated = sessionStorage.getItem('hostAuthenticated') === 'true';
 
         // Initialize Page Display
         function initializePage() {
+            if (!landingPage || !tvPanel || !adminPanel) return;
+
             if (isAuthenticated) {
                 landingPage.classList.add('hidden');
                 tvPanel.classList.add('hidden');
@@ -189,38 +216,54 @@
             }
         };
 
+        async function persistScores() {
+            if (firebaseConnected && scoreRef && db) {
+                try {
+                    await set(scoreRef, scores);
+                    return;
+                } catch (error) {
+                    console.error('Firebase write failed. Falling back to local storage.', error);
+                    firebaseConnected = false;
+                }
+            }
+
+            localStorage.setItem('houseScores', JSON.stringify(scores));
+            renderScores();
+        }
+
         // Update Firebase or Local Storage
-        window.updateScore = (team, delta) => {
+        window.updateScore = async (team, delta) => {
             if (!isAuthenticated) {
                 alert('You must be logged in as host to update scores');
                 return;
             }
             scores[team] = Math.max(0, scores[team] + delta);
-            
-            if (firebaseConnected && scoreRef && db) {
-                set(scoreRef, scores);
-            } else {
-                localStorage.setItem('houseScores', JSON.stringify(scores));
-                renderScores();
-            }
+
+            await persistScores();
         };
 
-        window.resetAllScores = () => {
+        window.resetAllScores = async () => {
             if (!isAuthenticated) {
                 alert('You must be logged in as host to reset scores');
                 return;
             }
             if (confirm('Are you sure you want to reset all scores? This cannot be undone.')) {
-                scores = { TeamA: 0, TeamB: 0, TeamC: 0, TeamD: 0, TeamE: 0 };
-                
-                if (firebaseConnected && scoreRef && db) {
-                    set(scoreRef, scores);
-                } else {
-                    localStorage.setItem('houseScores', JSON.stringify(scores));
-                    renderScores();
-                }
+                scores = createDefaultScores();
+
+                await persistScores();
             }
         };
+
+        // Keep viewer/admin in sync across tabs when running without backend.
+        window.addEventListener('storage', (event) => {
+            if (event.key !== 'houseScores' || !event.newValue) return;
+            try {
+                scores = JSON.parse(event.newValue);
+                renderScores();
+            } catch (error) {
+                console.error('Invalid houseScores payload in local storage event.', error);
+            }
+        });
 
         // Listen for Real-time changes if Firebase is connected
         if (firebaseConnected && scoreRef) {
@@ -245,6 +288,7 @@
             }, (error) => {
                 console.error('Firebase Error:', error);
                 // Fallback to local storage
+                firebaseConnected = false;
                 loadFromLocalStorage();
             });
         } else {
@@ -257,7 +301,7 @@
             if (saved) {
                 scores = JSON.parse(saved);
             } else {
-                scores = { TeamA: 0, TeamB: 0, TeamC: 0, TeamD: 0, TeamE: 0 };
+                scores = createDefaultScores();
                 localStorage.setItem('houseScores', JSON.stringify(scores));
             }
             
@@ -270,6 +314,9 @@
 
         function renderScores() {
             // Render Viewer Display
+            if (!scoreContainer) {
+                initDomRefs();
+            }
             if (!scoreContainer) return; // Exit if container not found
             
             scoreContainer.innerHTML = '';
@@ -330,6 +377,7 @@
         // Ensure page initializes when DOM is ready
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
+                initDomRefs();
                 setTimeout(() => {
                     if (!isDataLoaded) {
                         loadFromLocalStorage();
@@ -338,6 +386,7 @@
             });
         } else {
             // DOM is already loaded
+            initDomRefs();
             setTimeout(() => {
                 if (!isDataLoaded) {
                     loadFromLocalStorage();
@@ -439,9 +488,14 @@
                         </h2>
                         <p class="text-gray-300 text-sm">Manage House Cup points in real-time. Updates appear instantly everywhere.</p>
                     </div>
-                    <button onclick="logoutHost()" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg text-sm font-bold transition border border-red-500">
-                        🚪 Exit
-                    </button>
+                    <div class="flex gap-2">
+                        <button onclick="viewLeaderboard()" class="bg-blue-700 hover:bg-blue-800 text-white px-4 py-2 rounded-lg text-sm font-bold transition border border-blue-500">
+                            👁️ Leaderboard
+                        </button>
+                        <button onclick="logoutHost()" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg text-sm font-bold transition border border-red-500">
+                            🚪 Exit
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Score Controls -->
@@ -454,7 +508,7 @@
                         🔄 RESET ALL HOUSE POINTS
                     </button>
                     <p class="text-center text-xs text-gray-400 mt-3 italic">
-                        This action will reset all points to zero. Proceed with caution.
+                        This action will reset all points to 100. Proceed with caution.
                     </p>
                 </div>
 
